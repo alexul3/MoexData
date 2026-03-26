@@ -3,14 +3,12 @@ import csv
 import ast
 from datetime import datetime
 
-# Настройки подключения к PostgreSQL
 DB_NAME = "diplom"
 DB_USER = "postgres"
 DB_PASSWORD = "123"
 DB_HOST = "localhost"
 DB_PORT = "5432"
 
-# SQL для создания таблицы (если её нет)
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS news (
     id SERIAL PRIMARY KEY,
@@ -29,12 +27,10 @@ def parse_tickers(tickers_str):
         try:
             return ast.literal_eval(tickers_str)
         except (SyntaxError, ValueError):
-            # В случае ошибки возвращаем пустой список
             return []
     return []
 
 def main():
-    # Подключение к базе данных
     conn = psycopg2.connect(
         dbname=DB_NAME,
         user=DB_USER,
@@ -44,16 +40,14 @@ def main():
     )
     cur = conn.cursor()
 
-    # Создание таблицы
     cur.execute(CREATE_TABLE_SQL)
     conn.commit()
 
-    # Чтение TSV-файла
+    # Чтение файла
     with open('data.tsv', 'r', encoding='utf-8') as f:
         reader = csv.DictReader(f, delimiter='\t')
         for row in reader:
             title = row['title']
-            # Преобразуем score в float, если значение есть
             score = float(row['score']) if row['score'] else None
             link = row['link']
             summary = row['summary']
@@ -77,7 +71,6 @@ def main():
             """
             cur.execute(insert_sql, (title, score, link, summary, published, tickers_list))
 
-    # Фиксация изменений и закрытие соединения
     conn.commit()
     cur.close()
     conn.close()
