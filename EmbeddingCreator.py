@@ -6,8 +6,8 @@ from tqdm import tqdm  # для прогресс-бара
 # ----------------------------
 # 1. Загрузка данных
 # ----------------------------
-INPUT_FILE = "news.xlsx"  # укажите путь к вашему файлу
-OUTPUT_FILE = "news_with_embeddings.xlsx"
+INPUT_FILE = "news_test.xlsx"  # укажите путь к вашему файлу
+OUTPUT_FILE = r"D:\ot\news_with_embeddings.xlsx"
 
 # Читаем Excel, предполагаем, что первый столбец содержит новости
 df = pd.read_excel(INPUT_FILE, header=None)

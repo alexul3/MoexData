@@ -1,118 +1,107 @@
 import pandas as pd
 import requests
-from datetime import datetime
+import apimoex
+import os
 import time
+import re
+from datetime import timedelta
 
-def get_daily_candles(ticker, start_date, end_date):
+def safe_filename(ticker):
+    return re.sub(r'[\\/*?:"<>|]', '_', ticker)
+
+def get_all_candles(ticker, start_date, end_date, interval=24):
     """
-    Получает все дневные свечи для заданного тикера с MOEX ISS API.
-    Функция автоматически обрабатывает пагинацию (постраничную выдачу данных).
+    Получает свечи тикера с MOEX, автоматически разбивая длинный период
+    на части по 365 дней (ограничение API для внутридневных интервалов).
     """
-    all_candles = []  # Список для накопления данных со всех страниц
-    current_start = 0  # Смещение, с которого начинать выборку
-    page_size = 100  # Количество записей на одной странице (стандарт MOEX)
-    is_more_data = True
+    print(f"  Загружаю {ticker} (интервал {interval} мин) ...")
+    session = requests.Session()
+    start_dt = pd.to_datetime(start_date)
+    end_dt = pd.to_datetime(end_date)
+    all_frames = []
 
-    print(f"  Начинаю загрузку данных для {ticker}...")
-
-    while is_more_data:
-        # Формируем URL для запроса к API, добавляя параметры `start` и `limit`
-        url = (
-            f"https://iss.moex.com/iss/history/engines/stock/markets/shares/boards/tqbr/securities/{ticker}/candles.json"
-            f"?from={start_date}&till={end_date}&interval=24"
-            f"&start={current_start}&limit={page_size}"
-        )
-
+    # Разбиваем период на куски не длиннее 365 дней
+    current_start = start_dt
+    while current_start < end_dt:
+        chunk_end = min(current_start + timedelta(days=365), end_dt)
+        start_str = current_start.strftime('%Y-%m-%d')
+        end_str = chunk_end.strftime('%Y-%m-%d')
+        print(f"    Запрос периода: {start_str} — {end_str}")
         try:
-            response = requests.get(url)
-            response.raise_for_status()
-            data = response.json()
-
-            # Извлекаем данные для текущей страницы
-            candles_data = data['history']['data']
-
-            # Если данных на странице нет, значит, мы всё загрузили
-            if not candles_data:
-                is_more_data = False
-                print(f"    Все данные для {ticker} загружены.")
-                break
-
-            # Добавляем данные текущей страницы в общий список
-            all_candles.extend(candles_data)
-            print(f"    Загружена страница {current_start // page_size + 1}, получено {len(candles_data)} записей.")
-
-            # Готовимся к загрузке следующей страницы
-            current_start += page_size
-
-            # Небольшая пауза, чтобы не превысить лимит запросов (20 запросов в секунду)
-            time.sleep(0.1)
-
-        except requests.exceptions.RequestException as e:
-            print(f"    Ошибка при запросе к API: {e}")
-            return None
-        except KeyError as e:
-            print(f"    Не удалось найти данные в ответе. Возможно, тикер '{ticker}' не найден. Ошибка: {e}")
+            candles = apimoex.get_board_candles(
+                session,
+                security=ticker,
+                board='tqbr',
+                market='shares',
+                engine='stock',
+                start=start_str,
+                end=end_str,
+                interval=interval
+            )
+        except Exception as e:
+            print(f"    Ошибка запроса: {e}")
             return None
 
-    # После сбора всех страниц создаем DataFrame
-    if not all_candles:
-        print(f"    Данные для {ticker} за указанный период не найдены.")
+        if candles:
+            df_chunk = pd.DataFrame(candles)
+            all_frames.append(df_chunk)
+        else:
+            print(f"    Нет данных за {start_str}–{end_str}")
+        current_start = chunk_end + timedelta(days=1)
+        time.sleep(0.2)  # пауза между частями
+
+    if not all_frames:
+        print(f"    Данные для {ticker} полностью отсутствуют.")
         return None
 
-    # Нам нужны колонки из первого (любого) ответа. Возьмем их из последнего запроса.
-    candles_columns = data['history']['columns']
-    df = pd.DataFrame(all_candles, columns=candles_columns)
-
-    # Преобразуем колонку с датой в формат datetime
-    df['TRADEDATE'] = pd.to_datetime(df['TRADEDATE'])
-
-    # Устанавливаем дату в качестве индекса
+    df = pd.concat(all_frames, ignore_index=True)
+    # Приводим дату и делаем индекс
+    df['begin'] = pd.to_datetime(df['begin'])
+    df.rename(columns={'begin': 'TRADEDATE'}, inplace=True)
     df.set_index('TRADEDATE', inplace=True)
-
-    print(f"    Готово! Загружено {len(df)} записей для {ticker}.")
+    # Удаляем возможные дубликаты (если запросы пересекаются)
+    df = df[~df.index.duplicated(keep='first')]
+    df.sort_index(inplace=True)
+    print(f"    Загружено {len(df)} часовых записей.")
     return df
 
-
 if __name__ == "__main__":
-    # Параметры дат (можно изменить при необходимости)
     start = "2022-01-01"
     end = "2024-12-31"
 
-    # Чтение списка тикеров из Excel-файла (первый столбец, без заголовка)
-    tickers_file = "tickers_clean.xlsx"
+    # Чтение тикеров
+    tickers_file = "unique_ru_tickets.xlsx"
     try:
-        df_tickers = pd.read_excel(tickers_file, header=None)  # без заголовка
-        # Извлекаем первый столбец, отбрасываем пустые значения, приводим к строке
+        df_tickers = pd.read_excel(tickers_file, header=None)
         tickers = df_tickers.iloc[:, 0].dropna().astype(str).tolist()
-        # Убираем дубликаты, сохраняя порядок (опционально)
         unique_tickers = list(dict.fromkeys(tickers))
-        print(f"Загружено {len(tickers)} тикеров, уникальных: {len(unique_tickers)}")
+        print(f"Загружено тикеров: всего {len(tickers)}, уникальных {len(unique_tickers)}")
     except Exception as e:
-        print(f"Ошибка при чтении файла {tickers_file}: {e}")
+        print(f"Ошибка чтения файла {tickers_file}: {e}")
         exit(1)
 
-    # Папка для сохранения результатов (можно создать, если её нет)
-    import os
-    output_dir = "candles_data"
+    output_dir = "hourly_candles"   # новая папка для часовых данных
     os.makedirs(output_dir, exist_ok=True)
 
-    # Проходим по каждому уникальному тикеру
+    # ЗАДАЁМ ЧАСОВОЙ ИНТЕРВАЛ
+    INTERVAL_MINUTES = 60   # 60 минут = 1 час
+
     for i, ticker in enumerate(unique_tickers, 1):
-        print(f"\n[{i}/{len(unique_tickers)}] Обработка тикера: {ticker}")
-        df = get_daily_candles(ticker, start, end)
+        print(f"\n[{i}/{len(unique_tickers)}] Обработка {ticker}")
+        df = get_all_candles(ticker, start, end, interval=INTERVAL_MINUTES)
 
-        if df is not None:
-            # Формируем имя файла: тикер_даты.xlsx
-            excel_filename = f"{ticker}_candles_{start}_{end}.xlsx"
-            filepath = os.path.join(output_dir, excel_filename)
-            # Сбрасываем индекс, чтобы дата стала обычной колонкой
-            df_reset = df.reset_index()
-            df_reset.to_excel(filepath, sheet_name="Daily candles", index=False)
-            print(f"    Данные сохранены в файл: {filepath}")
+        if df is not None and not df.empty:
+            safe_ticker = safe_filename(ticker)
+            filename = f"{safe_ticker}_hourly_{start}_{end}.xlsx"
+            filepath = os.path.join(output_dir, filename)
+            try:
+                df.reset_index().to_excel(filepath, sheet_name="Hourly candles", index=False)
+                print(f"    Сохранено: {filepath}")
+            except Exception as e:
+                print(f"    Ошибка сохранения: {e}")
         else:
-            print(f"    Не удалось загрузить данные для {ticker}")
+            print(f"    Данные для {ticker} не получены.")
 
-        # Небольшая пауза между разными тикерами, чтобы не перегружать API
         time.sleep(0.5)
 
-    print("\nВсе тикеры обработаны.")
+    print("\nГотово.")
